@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local Task Collaboration</title>
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
+      header { display: flex; align-items: center; gap: 10px; }
+      .tasks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 20px; }
+      .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+      .row { display: flex; gap: 8px; align-items: center; }
+      input, textarea, select, button { padding: 6px 8px; }
+      textarea { width: 100%; }
+      .status { font-size: 12px; opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Gestion de tâches collaborative (local)</h1>
+      <button id="refresh">Actualiser</button>
+    </header>
+
+    <section>
+      <h2>Nouvelle tâche</h2>
+      <div class="card">
+        <div class="row"><input id="title" placeholder="Titre" /></div>
+        <div class="row"><textarea id="desc" placeholder="Description"></textarea></div>
+        <div class="row">
+          <label>Status: <select id="status">
+            <option value="todo">À faire</option>
+            <option value="doing">En cours</option>
+            <option value="done">Terminé</option>
+          </select></label>
+        </div>
+        <div class="row"><button id="create">Créer</button></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Liste des tâches</h2>
+      <div class="tasks" id="tasks"></div>
+    </section>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-8cDy7PObQhGmHvqHXMkVYV4Qe4jYQY9xAPW5IEUXmD2bIuZK4Xz4qVn+OVuHUB9H" crossorigin="anonymous"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
