@@ -361,7 +361,7 @@ yum install -y nginx git nodejs npm
 
 # Clone your frontend code
 cd /opt
-git clone YOUR_REPO_URL app
+git clone https://github.com/meriem-mejri/local-task-app.git app
 cd app/frontend
 npm install
 npm run build
@@ -394,14 +394,14 @@ yum install -y git nodejs npm
 
 # Clone your backend code
 cd /opt
-git clone YOUR_REPO_URL app
+git clone https://github.com/meriem-mejri/local-task-app.git app
 cd app/backend
 
 # Create .env file
 cat > .env << EOF
-DB_HOST=YOUR_RDS_ENDPOINT
+DB_HOST=localhost
 DB_USER=postgres
-DB_PASSWORD=YOUR_DB_PASSWORD
+DB_PASSWORD=postgres
 DB_NAME=taskdb
 DB_PORT=5432
 DB_SSL=true
