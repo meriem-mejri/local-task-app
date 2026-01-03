@@ -181,7 +181,79 @@ For each subnet:
 
 ### Step 2: Create Security Groups
 
-#### SG-ALB-External (External Load Balancer)
+**⚠️ IMPORTANT: Choose configuration based on deployment phase:**
+- **Phase A (Sandbox)**: Use simplified 4 SGs (no ALB security groups needed)
+- **Phase B (Production)**: Use full 6 SGs (includes SG-ALB-External and SG-ALB-Internal)
+
+---
+
+## Phase A: Sandbox Security Groups (4 SGs)
+
+### SG-FE (Frontend Instances)
+
+**Inbound Rules:**
+| Type       | Protocol | Port Range | Source Type | Source      | Description                                 |
+|------------|----------|-----------|-------------|-------------|---------------------------------------------|
+| HTTP       | TCP      | 80        | IPv4        | 0.0.0.0/0   | Allow HTTP from internet (direct access)    |
+| SSH        | TCP      | 22        | Security Group  | SG-Bastion  | Allow SSH from bastion host                 |
+
+**Outbound Rules:**
+| Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
+|-------------|----------|-----------|------------------|-------------|---------------------------------------|
+| All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound traffic            |
+
+---
+
+### SG-BE (Backend Instances)
+
+**Inbound Rules:**
+| Type       | Protocol | Port Range | Source Type | Source      | Description                                 |
+|------------|----------|-----------|-------------|-------------|---------------------------------------------|
+| Custom TCP | TCP      | 3000      | IPv4        | 0.0.0.0/0   | Allow API access from internet (testing)    |
+| SSH        | TCP      | 22        | Security Group  | SG-Bastion  | Allow SSH from bastion host                 |
+
+**Outbound Rules:**
+| Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
+|-------------|----------|-----------|------------------|-------------|---------------------------------------|
+| All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound traffic            |
+
+---
+
+### SG-DB (RDS Database)
+
+**Inbound Rules:**
+| Type       | Protocol | Port Range | Source Type     | Source | Description                           |
+|------------|----------|-----------|-----------------|--------|---------------------------------------|
+| PostgreSQL | TCP      | 5432      | Security Group  | SG-BE  | Allow backend instances to connect    |
+
+**Outbound Rules:**
+| Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
+|-------------|----------|-----------|------------------|-------------|---------------------------------------|
+| All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound (AWS managed)      |
+
+---
+
+### SG-Bastion
+
+**Inbound Rules:**
+| Type | Protocol | Port Range | Source Type | Source       | Description                           |
+|------|----------|-----------|-------------|--------------|---------------------------------------|
+| SSH  | TCP      | 22        | IPv4        | YOUR_IP/32   | Allow SSH from your admin IP only     |
+
+**Outbound Rules:**
+| Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
+|-------------|----------|-----------|------------------|-------------|---------------------------------------|
+| All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound traffic            |
+
+**Note**: Replace `YOUR_IP` with your actual public IP address (find it at https://whatismyip.com)
+
+---
+
+## Phase B: Production Security Groups (6 SGs)
+
+**For Phase B, create these 2 additional security groups:**
+
+### SG-ALB-External (External Load Balancer)
 
 **Inbound Rules:**
 | Type  | Protocol | Port Range | Source Type | Source      | Description                           |
@@ -211,7 +283,7 @@ For each subnet:
 
 ---
 
-#### SG-FE (Frontend Instances)
+### SG-FE (Frontend Instances) - UPDATED for Phase B
 
 **Inbound Rules:**
 | Type       | Protocol | Port Range | Source Type     | Source           | Description                                 |
@@ -226,7 +298,7 @@ For each subnet:
 
 ---
 
-#### SG-BE (Backend Instances)
+### SG-BE (Backend Instances) - UPDATED for Phase B
 
 **Inbound Rules:**
 | Type       | Protocol | Port Range | Source Type     | Source           | Description                                 |
@@ -239,35 +311,16 @@ For each subnet:
 |-------------|----------|-----------|------------------|-------------|---------------------------------------|
 | All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound traffic            |
 
----
-
-#### SG-DB (RDS Database)
-
-**Inbound Rules:**
-| Type       | Protocol | Port Range | Source Type     | Source | Description                           |
-|------------|----------|-----------|-----------------|--------|---------------------------------------|
-| PostgreSQL | TCP      | 5432      | Security Group  | SG-BE  | Allow backend instances to connect    |
-
-**Outbound Rules:**
-| Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
-|-------------|----------|-----------|------------------|-------------|---------------------------------------|
-| All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound (AWS managed)      |
+**Note**: SG-DB and SG-Bastion remain the same in both Phase A and Phase B (see Phase A section above).
 
 ---
 
-#### SG-Bastion
-
-**Inbound Rules:**
-| Type | Protocol | Port Range | Source Type | Source       | Description                           |
-|------|----------|-----------|-------------|--------------|---------------------------------------|
-| SSH  | TCP      | 22        | IPv4        | YOUR_IP/32   | Allow SSH from your admin IP only     |
-
-**Outbound Rules:**
-| Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
-|-------------|----------|-----------|------------------|-------------|---------------------------------------|
-| All traffic | All      | All       | IPv4             | 0.0.0.0/0   | Allow all outbound traffic            |
-
-**Note**: Replace `YOUR_IP` with your actual public IP address (find it at https://whatismyip.com)
+**Migration from Phase A to Phase B:**
+When moving from sandbox to production:
+1. Create SG-ALB-External and SG-ALB-Internal
+2. **Edit SG-FE**: Change HTTP source from `0.0.0.0/0` to `SG-ALB-External`
+3. **Edit SG-BE**: Change port 3000 source from `0.0.0.0/0` to `SG-ALB-Internal`
+4. Keep SG-DB and SG-Bastion unchanged
 
 ---
 
