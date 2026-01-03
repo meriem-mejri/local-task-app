@@ -78,14 +78,13 @@ Internet
    │
    └─── Application Load Balancer (Public Subnets)
          │
-         ├─── Frontend Target Group (Port 80)
-         │    └─── Frontend EC2 Instances (Private Subnets A & B)
-         │         └─── Auto Scaling Group (2-4 instances)
-         │
-         └─── Backend Target Group (Port 3000)
-              └─── Backend EC2 Instances (Private Subnets A & B)
-                   └─── Auto Scaling Group (2-4 instances)
-                   └─── RDS PostgreSQL Multi-AZ (Primary + Standby)
+         └─── Frontend Target Group (Port 80)
+              └─── Frontend EC2 Instances (Private Subnets A & B)
+                   │    └─── Auto Scaling Group (2-4 instances)
+                   │
+                   └─── Backend EC2 Instances (Private Subnets A & B)
+                        └─── Auto Scaling Group (2-4 instances)
+                        └─── RDS PostgreSQL Multi-AZ (Primary + Standby)
 ```
 
 ### Network Architecture
@@ -94,7 +93,7 @@ Internet
   - 2 Public (ALB, NAT, Bastion)
   - 6 Private (2 for Frontend, 2 for Backend, 2 for RDS)
 - **Security**: 5 Security Groups (SG-LB, SG-FE, SG-BE, SG-DB, SG-Bastion)
-- **Load Balancing**: Single ALB with 2 target groups (frontend on port 80, backend on port 3000)
+- **Load Balancing**: ALB forwards to Frontend, Frontend calls Backend directly
 - **High Availability**: Multi-AZ deployment, Auto Scaling
 - **Monitoring**: CloudWatch, CloudTrail, SNS alerts
 
@@ -192,7 +191,8 @@ For each subnet:
 **Inbound Rules:**
 | Type       | Protocol | Port Range | Source Type     | Source    | Description                                 |
 |------------|----------|-----------|-----------------|-----------|---------------------------------------------|
-| HTTP       | TCP      | 80        | Security Group  | SG-LB     | Allow traffic from load balancer            |
+| HTTP       | TCP      | 80        | Security Group  | SG-LB     | Allow HTTP traffic from load balancer       |
+| HTTPS      | TCP      | 443       | Security Group  | SG-LB     | Allow HTTPS traffic from load balancer      |
 | SSH        | TCP      | 22        | Security Group  | SG-Bastion| Allow SSH from bastion host                 |
 
 **Outbound Rules:**
@@ -204,11 +204,12 @@ For each subnet:
 
 ### SG-BE (Backend Instances)
 
+**Architecture Note:** Frontend instances call Backend API directly (private network communication). Traffic flow: `Browser → ALB:80 → Frontend:80 → Backend:3000`. Backend instances are NOT behind the load balancer.
+
 **Inbound Rules:**
 | Type       | Protocol | Port Range | Source Type     | Source    | Description                                 |
 |------------|----------|-----------|-----------------|-----------|---------------------------------------------|
-| Custom TCP | TCP      | 3000      | Security Group  | SG-LB     | Allow traffic from load balancer            |
-| Custom TCP | TCP      | 3000      | Security Group  | SG-FE     | Allow direct access from frontend           |
+| Custom TCP | TCP      | 3000      | Security Group  | SG-FE     | Allow API traffic from frontend instances   |
 | SSH        | TCP      | 22        | Security Group  | SG-Bastion| Allow SSH from bastion host                 |
 
 **Outbound Rules:**
@@ -221,9 +222,10 @@ For each subnet:
 ### SG-DB (RDS Database)
 
 **Inbound Rules:**
-| Type       | Protocol | Port Range | Source Type     | Source | Description                           |
-|------------|----------|-----------|-----------------|--------|---------------------------------------|
-| PostgreSQL | TCP      | 5432      | Security Group  | SG-BE  | Allow backend instances to connect    |
+| Type       | Protocol | Port Range | Source Type     | Source     | Description                           |
+|------------|----------|-----------|-----------------|------------|---------------------------------------|
+| PostgreSQL | TCP      | 5432      | Security Group  | SG-BE      | Allow backend instances to connect    |
+| SSH        | TCP      | 22        | Security Group  | SG-Bastion | Allow SSH from bastion for testing    |
 
 **Outbound Rules:**
 | Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
@@ -291,6 +293,11 @@ yum install -y nginx git nodejs npm
 cd /opt
 git clone https://github.com/meriem-mejri/local-task-app.git app
 cd app/frontend
+
+# Configure backend API endpoint (will be set to one of the backend private IPs)
+# Or use an internal NLB if you create one for backend load balancing
+echo "VITE_API_URL=http://BACKEND_PRIVATE_IP:3000" > .env
+
 npm install
 npm run build
 
@@ -348,9 +355,9 @@ pm2 save
 
 ---
 
-### Step 4: Create Shared Application Load Balancer
+### Step 4: Create Application Load Balancer
 
-#### 4.1 Create Target Groups
+#### 4.1 Create Frontend Target Group
 
 **Frontend Target Group**:
 1. **EC2** → **Target Groups** → **Create target group**
@@ -364,19 +371,9 @@ pm2 save
    - Health check interval: 30 seconds
 3. Don't register targets yet (Auto Scaling will do this)
 
-**Backend Target Group**:
-1. **EC2** → **Target Groups** → **Create target group**
-2. Settings:
-   - Target type: Instances
-   - Name: `backend-tg`
-   - Protocol: HTTP
-   - Port: 3000
-   - VPC: `project-vpc`
-   - Health check path: `/api/tasks`
-   - Health check interval: 30 seconds
-3. Don't register targets yet (Auto Scaling will do this)
+**Note**: Backend instances are NOT behind the load balancer. They will be called directly by frontend instances on port 3000.
 
-#### 4.2 Create Shared Application Load Balancer
+#### 4.2 Create Application Load Balancer
 1. **EC2** → **Load Balancers** → **Create ALB**
 2. Settings:
    - Name: `project-alb`
@@ -385,23 +382,16 @@ pm2 save
    - Subnets: Select `public-a` and `public-b` (must be in 2 AZs)
    - Security Group: `SG-LB`
 
-3. **Configure Listeners**:
+3. **Configure Listener**:
    
-   **Listener 1 - HTTP:80 (Frontend)**:
+   **Listener - HTTP:80 (Frontend)**:
    - Protocol: HTTP
    - Port: 80
    - Default action: Forward to `frontend-tg`
-   
-   **Listener 2 - HTTP:3000 (Backend)**:
-   - After creating the ALB, go to **Load Balancers** → `project-alb` → **Listeners**
-   - Click **Add listener**
-   - Protocol: HTTP
-   - Port: 3000
-   - Default action: Forward to `backend-tg`
 
 4. **Create the load balancer**
 
-**Note**: One ALB with two listeners (port 80 for frontend, port 3000 for backend) saves ~$20/month compared to using two separate load balancers!
+**Note**: Backend instances are in private subnets and are called directly by frontend instances (not through the ALB). This follows the traditional 3-tier architecture pattern.
 
 ---
 
@@ -432,9 +422,8 @@ pm2 save
    - Launch template: `backend-template`
    - VPC: `project-vpc`
    - Subnets: Select `private-be-a` and `private-be-b`
-   - Load balancing: Attach to existing load balancer
-     - Choose target group: `backend-tg`
-   - Health checks: ELB (enable)
+   - Load balancing: **No load balancer** (backend not behind ALB)
+   - Health checks: EC2 (enable)
    - Desired capacity: 2
    - Minimum capacity: 2
    - Maximum capacity: 4
@@ -442,6 +431,8 @@ pm2 save
    - Policy type: Target tracking scaling
    - Metric: Average CPU Utilization
    - Target value: 70%
+
+**Note**: Frontend instances will discover and call backend instances using private IPs or DNS. For simplicity, you can configure the frontend to use a single backend IP, or implement service discovery.
 
 ---
 
@@ -641,8 +632,6 @@ exit
 1. Go to **EC2** → **Target Groups**
 2. Select `frontend-tg`:
    - **Targets** tab → Status should show **healthy** for 2 instances
-3. Select `backend-tg`:
-   - **Targets** tab → Status should show **healthy** for 2 instances
 
 **Get ALB DNS Name:**
 - Go to **EC2** → **Load Balancers** → `project-alb`
@@ -653,23 +642,26 @@ exit
 2. Navigate to: `http://ALB_DNS_NAME`
 3. You should see your React task application!
 
-**Test Backend API (Port 3000):**
-1. Open browser or use command:
-```powershell
-# In PowerShell on your local Windows machine
-curl http://ALB_DNS_NAME:3000/api/tasks
+**Test Backend API (via Frontend):**
+1. The frontend application will call the backend API internally
+2. If you configured the backend endpoint correctly in the frontend build, API calls will work
+3. To test backend directly, SSH to a backend instance via bastion:
+```bash
+curl http://localhost:3000/api/tasks
 ```
-2. You should see JSON response: `[]` or list of tasks
 
 **If fails**:
 - **Target health "unhealthy"**: 
-  - Check security groups (SG-FE allows port 80 from SG-LB, SG-BE allows 3000 from SG-LB)
+  - Check security groups (SG-FE allows port 80 from SG-LB)
   - SSH via bastion and check if Nginx/PM2 are running
 - **Connection timeout**: 
-  - Check SG-LB allows ports 80 and 3000 from 0.0.0.0/0
+  - Check SG-LB allows port 80 from 0.0.0.0/0
   - Verify ALB is in public subnets
 - **No targets registered**: 
-  - Check Auto Scaling Groups are attached to correct target groups
+  - Check Frontend Auto Scaling Group is attached to `frontend-tg`
+- **Frontend can't reach backend**:
+  - Check SG-BE allows port 3000 from SG-FE
+  - Verify backend endpoint is correctly configured in frontend build
 
 ---
 
@@ -1127,11 +1119,11 @@ Document:
 - [ ] RDS PostgreSQL Multi-AZ running (primary + standby in separate AZs)
 - [ ] Frontend Launch Template created with correct security group
 - [ ] Backend Launch Template created with correct RDS endpoint
-- [ ] Shared ALB created with SG-LB security group
+- [ ] ALB created with SG-LB security group
 - [ ] Frontend Target Group (port 80) healthy and registered
-- [ ] Backend Target Group (port 3000) healthy and registered
 - [ ] Frontend Auto Scaling Group (2-4 instances) running
-- [ ] Backend Auto Scaling Group (2-4 instances) running
+- [ ] Backend Auto Scaling Group (2-4 instances) running in private subnets
+- [ ] Frontend can communicate with Backend (SG-FE → SG-BE on port 3000)
 - [ ] S3 bucket created with static assets uploaded
 - [ ] CloudFront distribution deployed and active
 - [ ] ACM certificate created and attached to ALB (HTTPS:443)
@@ -1156,7 +1148,7 @@ Document:
 - **Total**: ~$160/month
 
 **Cost Optimization Strategies Applied:**
-- ✅ Single shared ALB with 2 listeners (saves $20/month vs 2 separate ALBs)
+- ✅ Single ALB for frontend only (backend instances not behind ALB)
 - ✅ t2.micro instances (Free Tier eligible for first year)
 - ✅ Auto Scaling (scales down during low traffic)
 - ✅ CloudFront cost class: "Use only North America and Europe" (not all regions)
