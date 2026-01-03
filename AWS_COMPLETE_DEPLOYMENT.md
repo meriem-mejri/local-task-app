@@ -410,6 +410,262 @@ pm2 save
 
 ---
 
+### Step 3.6: Incremental Testing (DO NOT SKIP!)
+
+**Test after EACH step to catch issues early. Don't wait until everything is configured!**
+
+#### ✅ Test 1: After Bastion Host Launch (Step 3.1)
+**Wait**: 2-3 minutes for instance to start
+
+**Test SSH Access:**
+```powershell
+# Get bastion public IP from AWS Console
+# EC2 → Instances → bastion-host → Public IPv4 address
+
+# Test SSH connection (replace YOUR_KEY.pem and BASTION_IP)
+ssh -i path/to/YOUR_KEY.pem ec2-user@BASTION_IP
+```
+
+**Expected Result**: You should see Amazon Linux welcome message
+```
+   ,     #_
+   ~\_  ####_        Amazon Linux 2023
+  ~~  \_#####\
+  ~~     \###|
+  ~~       \#/ ___
+   ~~       V~' '->
+    ~~~         /
+```
+
+**If fails**: 
+- Check SG-Bastion allows port 22 from YOUR current IP
+- Verify key pair was selected during launch
+- Wait 1 more minute (instance might still be initializing)
+
+---
+
+#### ✅ Test 2: After Frontend EC2 Launch (Step 3.2 - Manual Test)
+
+**For Phase A (Sandbox - No ALB):**
+
+1. **Launch 1 Frontend Instance Manually** (for testing):
+   - **EC2** → **Launch Instance**
+   - Use same settings as template but **place in `public-a` subnet**
+   - **Enable auto-assign public IP**
+   - Security Group: **Temporarily allow HTTP (80) from 0.0.0.0/0**
+
+2. **Wait**: 3-5 minutes for user data script to execute
+
+3. **Check User Data Logs** (via Bastion):
+```powershell
+# SSH to bastion first
+ssh -i YOUR_KEY.pem ec2-user@BASTION_IP
+
+# From bastion, SSH to frontend EC2 private IP
+ssh ec2-user@FRONTEND_PRIVATE_IP
+
+# Check if user data script ran successfully
+sudo cat /var/log/cloud-init-output.log | tail -50
+
+# Check if Nginx is running
+sudo systemctl status nginx
+
+# Check if frontend files exist
+ls -la /usr/share/nginx/html/
+```
+
+**Expected Results**:
+- `cloud-init-output.log` shows no errors
+- Nginx status: `active (running)`
+- Frontend files exist in `/usr/share/nginx/html/`
+
+4. **Test via Browser**:
+```
+http://FRONTEND_PUBLIC_IP
+```
+You should see your React app homepage!
+
+**If fails**:
+- Check `cloud-init-output.log` for errors
+- Verify GitHub repo URL in user data is correct
+- Check if `npm install` completed: `ls /opt/app/frontend/node_modules`
+- Manually run build: `cd /opt/app/frontend && npm run build`
+
+---
+
+#### ✅ Test 3: After Backend EC2 Launch (Step 3.3 - Manual Test)
+
+**Before testing backend, deploy RDS first (Step 4) so backend can connect to database!**
+
+1. **Launch 1 Backend Instance Manually**:
+   - Same as frontend test, but in `public-a` (temporarily)
+   - **Enable auto-assign public IP**
+   - Security Group: **Temporarily allow port 3000 from 0.0.0.0/0**
+
+2. **Wait**: 3-5 minutes
+
+3. **Check Backend via Bastion**:
+```powershell
+# SSH to bastion → backend
+ssh -i YOUR_KEY.pem ec2-user@BASTION_IP
+ssh ec2-user@BACKEND_PRIVATE_IP
+
+# Check user data logs
+sudo cat /var/log/cloud-init-output.log | tail -50
+
+# Check if .env file was created
+cat /opt/app/backend/.env
+
+# Check if PM2 is running backend
+pm2 list
+pm2 logs api --lines 20
+```
+
+**Expected Results**:
+- `.env` file exists with RDS endpoint
+- PM2 shows `api` process with status `online`
+- Logs show: `✓ Server listening on http://localhost:3000` and `✓ Connected to PostgreSQL database`
+
+4. **Test API Endpoint**:
+```powershell
+# From your local machine
+curl http://BACKEND_PUBLIC_IP:3000/api/tasks
+```
+
+**Expected**: JSON response `[]` or list of tasks
+
+**If fails**:
+- Check RDS endpoint in `.env` is correct
+- Verify SG-DB allows port 5432 from SG-BE
+- Check backend logs: `pm2 logs api`
+- Test RDS connectivity from backend: `psql -h RDS_ENDPOINT -U postgres -d taskdb`
+
+---
+
+#### ✅ Test 4: After RDS Creation (Step 4.2)
+
+**Wait**: 10-15 minutes for RDS to become available
+
+**Test Database Connectivity**:
+```powershell
+# SSH to backend EC2 (via bastion)
+ssh -i YOUR_KEY.pem ec2-user@BASTION_IP
+ssh ec2-user@BACKEND_PRIVATE_IP
+
+# Install PostgreSQL client
+sudo yum install -y postgresql15
+
+# Test connection to RDS
+psql -h YOUR_RDS_ENDPOINT -U postgres -d taskdb
+# Enter password when prompted
+
+# Inside psql, check tables
+\dt
+SELECT * FROM tasks;
+\q
+```
+
+**Expected Results**:
+- Connection succeeds (no timeout or refused)
+- `tasks` table exists
+- Can query data
+
+**If fails**:
+- Check SG-DB inbound rules allow 5432 from SG-BE
+- Verify RDS is in `available` state (Console)
+- Check RDS endpoint spelling in `.env`
+- Ensure DB_SSL=true if connecting from EC2
+
+---
+
+#### ✅ Test 5: After ALB Creation (Step 3.4 - Phase B Only)
+
+**Wait**: 2-3 minutes for ALB to become active
+
+1. **Check ALB Health**:
+   - **EC2** → **Load Balancers** → Select `frontend-alb`
+   - **Target Groups** → `frontend-tg` → **Targets** tab
+   - Status should show `healthy` for registered instances
+
+2. **Test ALB Endpoint**:
+```powershell
+# Get ALB DNS from Console
+# EC2 → Load Balancers → frontend-alb → DNS name
+
+# Test in browser
+http://FRONTEND_ALB_DNS_NAME
+```
+
+**Expected**: React app loads via ALB
+
+**If fails**:
+- Target health shows `unhealthy`: Check SG-FE allows port 80 from SG-ALB-External
+- No targets registered: Auto Scaling Group might not be attached to target group
+- Connection timeout: Check ALB security group allows 80/443 from 0.0.0.0/0
+
+---
+
+#### ✅ Test 6: End-to-End Test (After All Steps)
+
+**Test complete user flow:**
+
+1. **Open Frontend** (via ALB or EC2 public IP)
+2. **Create Task**: Fill title "Test Task" → Click "Ajouter"
+3. **Verify Database**: SSH to backend → `psql` → `SELECT * FROM tasks;`
+4. **Update Task**: Edit title to "Updated Task" → Save
+5. **Change Status**: Dropdown → "Doing"
+6. **Delete Task**: Click 🗑️ → Confirm
+
+**All should work without errors!**
+
+---
+
+### Testing Best Practices
+
+✅ **DO**:
+- Test after each major step (bastion → frontend → backend → RDS → ALB)
+- Check user data logs before assuming instance is ready
+- Verify security groups allow required traffic
+- Use Bastion to access private instances
+- Keep manual test instances running until ASG is verified
+
+❌ **DON'T**:
+- Launch Auto Scaling Groups before testing launch templates manually
+- Skip checking `cloud-init-output.log` (most failures are in user data)
+- Delete test instances until confirming ASG works
+- Assume "running" status means application is ready (wait for user data to finish)
+
+---
+
+### Quick Troubleshooting Commands
+
+**Check if user data finished:**
+```bash
+sudo cat /var/log/cloud-init-output.log | grep -i "cloud-init.*done"
+```
+
+**Restart services:**
+```bash
+# Frontend (Nginx)
+sudo systemctl restart nginx
+sudo systemctl status nginx
+
+# Backend (PM2)
+pm2 restart api
+pm2 logs api --lines 50
+```
+
+**Test internal connectivity:**
+```bash
+# From frontend EC2, test backend ALB
+curl http://BACKEND_ALB_INTERNAL_DNS:3000/api/tasks
+
+# From backend EC2, test RDS
+pg_isready -h YOUR_RDS_ENDPOINT -p 5432
+```
+
+---
+
 ### Step 4: Deploy Amazon RDS
 
 #### 4.1 Create DB Subnet Group
