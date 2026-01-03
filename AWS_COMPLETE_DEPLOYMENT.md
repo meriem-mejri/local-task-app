@@ -332,11 +332,12 @@ When moving from sandbox to production:
    - Name: `bastion-host`
    - AMI: Amazon Linux 2023
    - Instance type: t2.micro
-   - Key pair: Create or select existing
+   - **Key pair**: Create new key pair (e.g., `project-key`) or select existing
+     - **IMPORTANT**: Download `.pem` file and save securely (you'll use this for all EC2 instances)
    - Network: `project-vpc`
    - Subnet: `public-a`
    - Security Group: `SG-Bastion`
-   - Auto-assign public IP: Enable
+   - Auto-assign public IP: **Enable** ✅
 
 #### 3.2 Create Frontend Launch Template
 1. **EC2** → **Launch Templates** → **Create**
@@ -344,7 +345,14 @@ When moving from sandbox to production:
    - Name: `frontend-template`
    - AMI: Amazon Linux 2023
    - Instance type: t2.micro
+   - **Key pair**: Select `project-key` (same as bastion)
+   - **Network settings**:
+     - **Phase A (Sandbox)**: Leave subnet blank (will specify during manual launch)
+     - **Phase B (Production)**: Leave blank (Auto Scaling Group will use `private-fe-a` and `private-fe-b`)
    - Security Group: `SG-FE`
+   - **Auto-assign public IP**:
+     - **Phase A**: Enable (for direct access)
+     - **Phase B**: Disable (private subnet, ALB handles traffic)
    - User data:
 ```bash
 #!/bin/bash
@@ -370,7 +378,14 @@ systemctl start nginx
    - Name: `backend-template`
    - AMI: Amazon Linux 2023
    - Instance type: t2.micro
+   - **Key pair**: Select `project-key` (same as bastion)
+   - **Network settings**:
+     - **Phase A (Sandbox)**: Leave subnet blank (will specify during manual launch)
+     - **Phase B (Production)**: Leave blank (Auto Scaling Group will use `private-be-a` and `private-be-b`)
    - Security Group: `SG-BE`
+   - **Auto-assign public IP**:
+     - **Phase A**: Enable (for direct access)
+     - **Phase B**: Disable (private subnet, internal ALB handles traffic)
    - User data:
 ```bash
 #!/bin/bash
@@ -503,9 +518,15 @@ ssh -i path/to/YOUR_KEY.pem ec2-user@BASTION_IP
 
 1. **Launch 1 Frontend Instance Manually** (for testing):
    - **EC2** → **Launch Instance**
-   - Use same settings as template but **place in `public-a` subnet**
-   - **Enable auto-assign public IP**
-   - Security Group: **Temporarily allow HTTP (80) from 0.0.0.0/0**
+   - Name: `frontend-test`
+   - AMI: Amazon Linux 2023
+   - Instance type: t2.micro
+   - **Key pair**: `project-key` (same as bastion)
+   - **Network**: `project-vpc`
+   - **Subnet**: `public-a` (Phase A) or `private-fe-a` (Phase B testing via Bastion)
+   - **Auto-assign public IP**: **Enable** (Phase A) or **Disable** (Phase B)
+   - **Security Group**: `SG-FE` (ensure HTTP from 0.0.0.0/0 for Phase A)
+   - **User data**: Copy from frontend-template above
 
 2. **Wait**: 3-5 minutes for user data script to execute
 
@@ -551,9 +572,16 @@ You should see your React app homepage!
 **Before testing backend, deploy RDS first (Step 4) so backend can connect to database!**
 
 1. **Launch 1 Backend Instance Manually**:
-   - Same as frontend test, but in `public-a` (temporarily)
-   - **Enable auto-assign public IP**
-   - Security Group: **Temporarily allow port 3000 from 0.0.0.0/0**
+   - **EC2** → **Launch Instance**
+   - Name: `backend-test`
+   - AMI: Amazon Linux 2023
+   - Instance type: t2.micro
+   - **Key pair**: `project-key` (same as bastion)
+   - **Network**: `project-vpc`
+   - **Subnet**: `public-a` (Phase A) or `private-be-a` (Phase B testing via Bastion)
+   - **Auto-assign public IP**: **Enable** (Phase A) or **Disable** (Phase B)
+   - **Security Group**: `SG-BE` (ensure port 3000 from 0.0.0.0/0 for Phase A)
+   - **User data**: Copy from backend-template above (update RDS endpoint!)
 
 2. **Wait**: 3-5 minutes
 
