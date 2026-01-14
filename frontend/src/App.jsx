@@ -7,6 +7,9 @@ function App() {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  
+  // Get backend API URL from environment, default to localhost for development
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
   // Load initial tasks
   useEffect(() => {
@@ -16,7 +19,7 @@ function App() {
   const fetchTasks = async () => {
     try {
       setLoading(true);
-      const res = await fetch('http://localhost:3000/api/tasks');
+      const res = await fetch(`${API_URL}/api/tasks`);
       if (!res.ok) throw new Error('Failed to fetch tasks');
       const data = await res.json();
       setTasks(data);
@@ -30,7 +33,7 @@ function App() {
 
   const handleAddTask = async (taskData) => {
     try {
-      const res = await fetch('http://localhost:3000/api/tasks', {
+      const res = await fetch(`${API_URL}/api/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(taskData),
@@ -44,7 +47,7 @@ function App() {
 
   const handleUpdateTask = async (id, updates) => {
     try {
-      const res = await fetch(`http://localhost:3000/api/tasks/${id}`, {
+      const res = await fetch(`${API_URL}/api/tasks/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
@@ -58,7 +61,7 @@ function App() {
 
   const handleDeleteTask = async (id) => {
     try {
-      const res = await fetch(`http://localhost:3000/api/tasks/${id}`, {
+      const res = await fetch(`${API_URL}/api/tasks/${id}`, {
         method: 'DELETE',
       });
       await fetchTasks(); // Refresh list after deletion
