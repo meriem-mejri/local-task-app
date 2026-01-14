@@ -90,10 +90,10 @@ Internet
 ### Network Architecture
 - **VPC**: 10.0.0.0/16
 - **8 Subnets** across 2 Availability Zones:
-  - 2 Public (ALB, NAT, Bastion)
-  - 6 Private (2 for Frontend, 2 for Backend, 2 for RDS)
+   - 2 Public (ALB, NAT, Bastion)
+   - 6 Private (2 for Frontend, 2 for Backend, 2 for RDS)
 - **Security**: 5 Security Groups (SG-LB, SG-FE, SG-BE, SG-DB, SG-Bastion)
-- **Load Balancing**: ALB forwards to Frontend, Frontend calls Backend directly
+- **Load Balancing**: ALB forwards to Frontend on port 80 and Backend on port 3000
 - **High Availability**: Multi-AZ deployment, Auto Scaling
 - **Monitoring**: CloudWatch, CloudTrail, SNS alerts
 
@@ -136,7 +136,7 @@ For each subnet:
 
 #### 1.3 Create Internet Gateway
 1. **VPC** → **Internet Gateways** → **Create IGW**
-2. Name: `project-igw`
+2. Name: `project `
 3. Attach to `project-vpc`
 
 #### 1.4 Create NAT Gateways (2 - one per AZ)
@@ -178,6 +178,7 @@ For each subnet:
 |------------|----------|-----------|-------------|-------------|---------------------------------------------|
 | HTTP       | TCP      | 80        | IPv4        | 0.0.0.0/0   | Allow HTTP from internet                    |
 | HTTPS      | TCP      | 443       | IPv4        | 0.0.0.0/0   | Allow HTTPS from internet                   |
+| Custom TCP | TCP      | 3000      | IPv4        | 0.0.0.0/0   | Allow backend listener traffic              |
 
 **Outbound Rules:**
 | Type        | Protocol | Port Range | Destination Type | Destination | Description                           |
@@ -204,12 +205,12 @@ For each subnet:
 
 ### SG-BE (Backend Instances)
 
-**Architecture Note:** Frontend instances call Backend API directly (private network communication). Traffic flow: `Browser → ALB:80 → Frontend:80 → Backend:3000`. Backend instances are NOT behind the load balancer.
+**Architecture Note:** Backend instances sit behind the ALB on listener **3000**. Traffic flow: `Browser → ALB:80/443 → Frontend` and `Browser/Frontend → ALB:3000 → Backend`.
 
 **Inbound Rules:**
 | Type       | Protocol | Port Range | Source Type     | Source    | Description                                 |
 |------------|----------|-----------|-----------------|-----------|---------------------------------------------|
-| Custom TCP | TCP      | 3000      | Security Group  | SG-FE     | Allow API traffic from frontend instances   |
+| Custom TCP | TCP      | 3000      | Security Group  | SG-LB     | Allow API traffic from ALB listener 3000    |
 | SSH        | TCP      | 22        | Security Group  | SG-Bastion| Allow SSH from bastion host                 |
 
 **Outbound Rules:**
@@ -289,14 +290,13 @@ For each subnet:
 yum update -y
 yum install -y nginx git nodejs npm
 
-# Clone your frontend code
+# Clone your frontend code (IMPORTANT: Repository must be PUBLIC on GitHub)
 cd /opt
 git clone https://github.com/meriem-mejri/local-task-app.git app
 cd app/frontend
 
-# Configure backend API endpoint (will be set to one of the backend private IPs)
-# Or use an internal NLB if you create one for backend load balancing
-echo "VITE_API_URL=http://BACKEND_PRIVATE_IP:3000" > .env
+# Configure backend API endpoint to use ALB on port 3000
+echo "VITE_API_URL=http://mericha-alb-2093157694.us-east-1.elb.amazonaws.com:3000" > .env
 
 npm install
 npm run build
@@ -305,6 +305,8 @@ npm run build
 cp -r dist/* /usr/share/nginx/html/
 systemctl enable nginx
 systemctl start nginx
+
+echo "Frontend deployment complete"
 ```
 
 #### 3.3 Create Backend Launch Template
@@ -321,19 +323,20 @@ systemctl start nginx
    - User data:
 ```bash
 #!/bin/bash
+export HOME=/root
 yum update -y
-yum install -y git nodejs npm
+yum install -y git nodejs npm postgresql15
 
 # Clone your backend code
 cd /opt
 git clone https://github.com/meriem-mejri/local-task-app.git app
 cd app/backend
 
-# Create .env file (UPDATE RDS_ENDPOINT after RDS creation!)
+# Create .env file with RDS credentials
 cat > .env << EOF
-DB_HOST=YOUR_RDS_ENDPOINT_HERE
+DB_HOST=mericha-db.cag8awitwgg7.us-east-1.rds.amazonaws.com
 DB_USER=postgres
-DB_PASSWORD=YOUR_PASSWORD_HERE
+DB_PASSWORD=Mericha2025
 DB_NAME=taskdb
 DB_PORT=5432
 DB_SSL=true
@@ -341,16 +344,29 @@ PORT=3000
 NODE_ENV=production
 EOF
 
+# Install dependencies
 npm install
 npm install -g pm2
 
-# Run migrations (after RDS is available)
-node src/migrate.js
+# Run database migrations with retry logic
+echo "Waiting for RDS to be ready..."
+sleep 20
+MAX_RETRIES=5
+RETRY_COUNT=0
+until node src/migrate.js || [ $RETRY_COUNT -eq $MAX_RETRIES ]; do
+  echo "Migration failed, retrying in 10 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
+  RETRY_COUNT=$((RETRY_COUNT+1))
+  sleep 10
+done
 
-# Start backend
+# Configure PM2 startup
+pm2 startup systemd -u root --hp /root
+
+# Start backend with PM2
 pm2 start src/server.js --name api
-pm2 startup
 pm2 save
+
+echo "Backend deployment complete"
 ```
 
 ---
@@ -371,9 +387,21 @@ pm2 save
    - Health check interval: 30 seconds
 3. Don't register targets yet (Auto Scaling will do this)
 
-**Note**: Backend instances are NOT behind the load balancer. They will be called directly by frontend instances on port 3000.
+#### 4.2 Create Backend Target Group
 
-#### 4.2 Create Application Load Balancer
+**Backend Target Group**:
+1. **EC2** → **Target Groups** → **Create target group**
+2. Settings:
+   - Target type: Instances
+   - Name: `backend-tg`
+   - Protocol: HTTP
+   - Port: 3000
+   - VPC: `project-vpc`
+   - Health check path: `/api/tasks`
+   - Health check interval: 30 seconds
+3. Don't register targets yet (Auto Scaling will do this)
+
+#### 4.3 Create Application Load Balancer
 1. **EC2** → **Load Balancers** → **Create ALB**
 2. Settings:
    - Name: `project-alb`
@@ -389,9 +417,12 @@ pm2 save
    - Port: 80
    - Default action: Forward to `frontend-tg`
 
-4. **Create the load balancer**
+   **Listener - HTTP:3000 (Backend)**:
+   - Protocol: HTTP
+   - Port: 3000
+   - Default action: Forward to `backend-tg`
 
-**Note**: Backend instances are in private subnets and are called directly by frontend instances (not through the ALB). This follows the traditional 3-tier architecture pattern.
+4. **Create the load balancer**
 
 ---
 
@@ -422,8 +453,9 @@ pm2 save
    - Launch template: `backend-template`
    - VPC: `project-vpc`
    - Subnets: Select `private-be-a` and `private-be-b`
-   - Load balancing: **No load balancer** (backend not behind ALB)
-   - Health checks: EC2 (enable)
+   - Load balancing: Attach to existing load balancer
+     - Choose target group: `backend-tg`
+   - Health checks: ELB (enable)
    - Desired capacity: 2
    - Minimum capacity: 2
    - Maximum capacity: 4
@@ -431,8 +463,6 @@ pm2 save
    - Policy type: Target tracking scaling
    - Metric: Average CPU Utilization
    - Target value: 70%
-
-**Note**: Frontend instances will discover and call backend instances using private IPs or DNS. For simplicity, you can configure the frontend to use a single backend IP, or implement service discovery.
 
 ---
 
@@ -632,6 +662,8 @@ exit
 1. Go to **EC2** → **Target Groups**
 2. Select `frontend-tg`:
    - **Targets** tab → Status should show **healthy** for 2 instances
+3. Select `backend-tg`:
+   - **Targets** tab → Status should show **healthy** for 2 instances
 
 **Get ALB DNS Name:**
 - Go to **EC2** → **Load Balancers** → `project-alb`
@@ -642,13 +674,11 @@ exit
 2. Navigate to: `http://ALB_DNS_NAME`
 3. You should see your React task application!
 
-**Test Backend API (via Frontend):**
-1. The frontend application will call the backend API internally
-2. If you configured the backend endpoint correctly in the frontend build, API calls will work
-3. To test backend directly, SSH to a backend instance via bastion:
+**Test Backend API (via ALB listener 3000):**
 ```bash
-curl http://localhost:3000/api/tasks
+curl http://ALB_DNS_NAME:3000/api/tasks
 ```
+You should get `[]` or a list of tasks.
 
 **If fails**:
 - **Target health "unhealthy"**: 
@@ -660,8 +690,8 @@ curl http://localhost:3000/api/tasks
 - **No targets registered**: 
   - Check Frontend Auto Scaling Group is attached to `frontend-tg`
 - **Frontend can't reach backend**:
-  - Check SG-BE allows port 3000 from SG-FE
-  - Verify backend endpoint is correctly configured in frontend build
+   - Check SG-BE allows port 3000 from SG-LB
+   - Verify frontend build points to `http://ALB_DNS_NAME:3000`
 
 ---
 
@@ -746,9 +776,7 @@ pm2 logs api --lines 50
 
 **Test connectivity from frontend to backend:**
 ```bash
-# Connect to frontend via bastion
-curl http://BACKEND_PRIVATE_IP:3000/api/tasks
-# OR test via ALB listener
+# From any instance (or your laptop if ALB is public)
 curl http://ALB_DNS_NAME:3000/api/tasks
 ```
 
@@ -773,10 +801,10 @@ pg_isready -h RDS_ENDPOINT -p 5432
 1. **RDS** → **Create database**
 2. Settings:
    - Engine: PostgreSQL 15
-   - Template: **Production** (enables Multi-AZ by default)
-   - DB instance identifier: `project-db`
+   - Template: **Dev/Test** (enables Multi-AZ by default)
+   - DB instance identifier: `mericha-db`
    - Master username: `postgres`
-   - Master password: (create and save securely - you'll need this!)
+   - Master password: Mericha123
    - Instance class: **db.t3.micro** (or db.t4g.micro)
    - Storage: 20 GB (General Purpose SSD)
    - **Multi-AZ**: ✅ **Enable** (REQUIRED for high availability)
@@ -820,65 +848,180 @@ After RDS is created, update the backend launch template:
 
 ### Step 7: Deploy S3, CloudFront, Security & Monitoring
 
+#### 7.0 Build Frontend Locally (Prerequisite)
+
+**Before uploading to S3, build the frontend application locally to create the production-ready `dist/` folder:**
+
+**On Windows (PowerShell):**
+```powershell
+# Navigate to your project
+cd "C:\Users\21656\OneDrive\Desktop\IGL4\Cloud\local-task-app"
+cd frontend
+
+# Install dependencies
+npm install
+
+# Build for production (creates dist/ folder)
+npm run build
+
+# Verify the build output
+ls dist/
+```
+
+**Expected output:**
+- ✓ `dist/index.html` (main entry point)
+- ✓ `dist/assets/` folder (contains bundled JS and CSS)
+- ✓ `dist/vite.svg` (Vite logo)
+- ✓ Total size: ~200-300 KB
+
+**If build fails:**
+- Ensure Node.js is installed: `node --version` (should be v16+)
+- Clear cache: `npm cache clean --force`
+- Delete node_modules: `Remove-Item node_modules -Recurse`
+- Reinstall: `npm install`
+- Rebuild: `npm run build`
+
+---
+
 #### 7.1 Create S3 Bucket for Static Assets
 1. **S3** → **Create bucket**
 2. Settings:
    - Name: `project-static-assets-UNIQUEID` (must be globally unique, use your student ID)
-   - Region: **Same as your VPC** (eu-west-1)
+   - Region: **Same as your VPC** (us-east-1)
    - Block all public access: ✅ **Enable** (CloudFront will handle access)
    - Versioning: Enable (for asset rollback)
 3. Click **Create bucket**
 
-**Upload Static Assets:**
-1. Go to your S3 bucket
-2. Create folder structure:
-   ```
-   /images
-   /stylesheets
-   /fonts
-   /js
-   ```
-3. Upload frontend static assets (from your build output):
-   - Images, CSS libraries, JavaScript libraries
-   - Do NOT upload HTML (served by CloudFront with cache headers)
+**Upload Frontend Build Output to S3:**
+
+**Option 1: AWS Console (Manual - Easy)**
+1. Go to your S3 bucket → **Upload**
+2. **Add folder** → Select your local `dist/` folder
+3. AWS will upload all files with correct folder structure
+4. Verify upload completed:
+   - `index.html` should be visible in bucket root
+   - `assets/` folder should contain JS/CSS files
+
+**Option 2: PowerShell (Automated - Recommended)**
+
+**Prerequisites**: AWS CLI installed
+```powershell
+# Check if AWS CLI is installed
+aws --version
+
+# If not installed, run:
+winget install Amazon.AWSCLI
+```
+
+**Upload all files from dist/ to S3:**
+```powershell
+# Navigate to your project frontend folder
+cd "C:\Users\21656\OneDrive\Desktop\IGL4\Cloud\local-task-app\frontend"
+
+# Set your bucket name (replace with your actual bucket)
+$BUCKET_NAME = "project-static-assets-UNIQUEID"
+$REGION = "us-east-1"
+
+# Upload all files from dist/ folder (preserves folder structure)
+aws s3 sync dist/ s3://$BUCKET_NAME --region $REGION --delete
+
+# Verify upload
+aws s3 ls s3://$BUCKET_NAME --recursive --region $REGION
+```
+
+**Upload with specific cache control headers** (better for CloudFront):
+```powershell
+# Upload HTML with no cache (always fetch latest)
+aws s3 cp dist/index.html s3://$BUCKET_NAME/index.html `
+  --cache-control "max-age=0, no-cache, must-revalidate" `
+  --content-type "text/html" `
+  --region $REGION
+
+# Upload assets/ folder with long cache (30 days - safe since hashes change on rebuild)
+aws s3 sync dist/assets s3://$BUCKET_NAME/assets `
+  --cache-control "max-age=2592000, public, immutable" `
+  --region $REGION
+
+# Upload other static files (vite.svg, etc) with long cache
+aws s3 sync dist/ s3://$BUCKET_NAME `
+  --exclude "index.html" --exclude "assets/*" `
+  --cache-control "max-age=604800, public" `
+  --region $REGION
+```
+
+**Verify S3 contents:**
+```powershell
+# List all uploaded files
+aws s3 ls s3://$BUCKET_NAME --recursive --region $REGION
+
+# Expected output:
+# 2024-01-05 10:15:23       1234 assets/index-HASH.js
+# 2024-01-05 10:15:23        567 assets/index-HASH.css
+# 2024-01-05 10:15:23       5678 index.html
+# 2024-01-05 10:15:23       1234 vite.svg
+```
+
+**Files in S3 should match your local dist/ structure:**
+```
+s3://project-static-assets-UNIQUEID/
+├── index.html
+├── vite.svg
+└── assets/
+    ├── index-[hash].js
+    └── index-[hash].css
+```
 
 #### 7.2 Create CloudFront Distribution
 1. **CloudFront** → **Distributions** → **Create distribution**
-2. Settings:
-   - **Origin domain**: Select your S3 bucket from dropdown
+2. **Origin settings**:
+   - **Origin domain**: Select your S3 bucket from dropdown (must match bucket name exactly)
+   - **Origin path**: Leave empty (serves from bucket root)
    - **Origin access control**: 
      - Create new control: `project-s3-oac`
+     - Origin access control header: default
      - Select **Sign requests (recommended)**
-   - **Default cache behavior**:
-     - Compress objects automatically: ✅
-     - Cache policy: **CachingOptimized**
-     - Origin request policy: **CORS-S3Origin**
-   - **Viewer protocol policy**: **Redirect HTTP to HTTPS**
-   - **Allowed HTTP methods**: GET, HEAD, OPTIONS
-   - **Alternate domain names (CNAMEs)**: (optional if you have a domain)
-   - **Default root object**: `index.html`
-   - **Enable logging**: ✅ (optional, logs to CloudFront logs bucket)
-   - **Price class**: **Use only North America and Europe** (cost optimization)
 
-3. Click **Create distribution**
-4. **Wait 5-10 minutes** for CloudFront to deploy
-5. Note the **CloudFront domain name** (e.g., `d123456.cloudfront.net`)
+3. **Default cache behavior**:
+   - **Viewer protocol policy**: **Redirect HTTP to HTTPS** (ensure secure access)
+   - **Allowed HTTP methods**: GET, HEAD, OPTIONS (read-only for static assets)
+   - **Compress objects automatically**: ✅ (compresses JS/CSS)
+   - **Cache policy**: **CachingOptimized** (uses object tags for cache control)
+   - **Origin request policy**: **CORS-S3Origin** (allows S3 CORS)
 
-**Update S3 Bucket Policy:**
-After CloudFront distribution is created:
+4. **Settings**:
+   - **Alternate domain names (CNAMEs)**: Leave empty (use CloudFront domain)
+   - **Default root object**: `index.html` (IMPORTANT - routes / to index.html)
+   - **Standard logging**: Disable (optional, can add later)
+   - **Price class**: **Use North America, Europe, Asia, Middle East, Africa** (or US+Europe to save cost)
+   - **Enable IPv6**: ✅
+
+5. Click **Create distribution**
+6. **Wait 5-10 minutes** for CloudFront deployment (watch for "Deploy in progress" → "Deployed")
+7. Note the **CloudFront domain name** (e.g., `d123456.cloudfront.net`)
+
+**After CloudFront deployment completes:**
+- Test access: Open browser to `https://d123456.cloudfront.net`
+- Should load your React application (index.html)
+- Should work exactly like accessing from ALB (all backend calls go to ALB:3000)
+
+**Update S3 Bucket Policy for CloudFront Access:**
+
+After CloudFront distribution is created, restrict S3 access to CloudFront only (block public access):
+
 1. Go to **S3** → Your bucket → **Permissions** → **Bucket Policy**
-2. CloudFront will show you a policy to add. Click **Copy policy from distribution** or add:
+2. Click **Edit** → Replace with this policy:
 ```json
 {
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "AllowCloudFrontAccess",
             "Effect": "Allow",
             "Principal": {
                 "Service": "cloudfront.amazonaws.com"
             },
             "Action": "s3:GetObject",
-            "Resource": "arn:aws:s3:::YOUR-BUCKET-NAME/*",
+            "Resource": "arn:aws:s3:::project-static-assets-UNIQUEID/*",
             "Condition": {
                 "StringEquals": {
                     "AWS:SourceArn": "arn:aws:cloudfront::YOUR-ACCOUNT-ID:distribution/YOUR-DISTRIBUTION-ID"
@@ -888,6 +1031,28 @@ After CloudFront distribution is created:
     ]
 }
 ```
+
+**To find your Account ID and Distribution ID:**
+```powershell
+# Get your AWS Account ID
+aws sts get-caller-identity --query Account --output text
+
+# Get your CloudFront Distribution ID (after creating distribution)
+aws cloudfront list-distributions --query "DistributionList.Items[0].Id" --output text
+```
+
+3. **Replace** in the policy:
+   - `project-static-assets-UNIQUEID` → your actual bucket name
+   - `YOUR-ACCOUNT-ID` → your AWS Account ID (from above)
+   - `YOUR-DISTRIBUTION-ID` → your CloudFront Distribution ID (from above)
+
+4. Click **Save changes**
+
+**Verify:**
+- S3 bucket is now **private** (no public access)
+- Only CloudFront can read files (via OAC - Origin Access Control)
+- Files NOT accessible directly from S3 URL
+- Files ARE accessible from CloudFront domain
 
 #### 7.3 Configure AWS Certificate Manager (ACM) - HTTPS/TLS
 
@@ -1123,7 +1288,7 @@ Document:
 - [ ] Frontend Target Group (port 80) healthy and registered
 - [ ] Frontend Auto Scaling Group (2-4 instances) running
 - [ ] Backend Auto Scaling Group (2-4 instances) running in private subnets
-- [ ] Frontend can communicate with Backend (SG-FE → SG-BE on port 3000)
+- [ ] Backend reachable via ALB listener 3000 (SG-LB → SG-BE on port 3000)
 - [ ] S3 bucket created with static assets uploaded
 - [ ] CloudFront distribution deployed and active
 - [ ] ACM certificate created and attached to ALB (HTTPS:443)
@@ -1148,7 +1313,7 @@ Document:
 - **Total**: ~$160/month
 
 **Cost Optimization Strategies Applied:**
-- ✅ Single ALB for frontend only (backend instances not behind ALB)
+- ✅ Single shared ALB for frontend (80/443) and backend (3000)
 - ✅ t2.micro instances (Free Tier eligible for first year)
 - ✅ Auto Scaling (scales down during low traffic)
 - ✅ CloudFront cost class: "Use only North America and Europe" (not all regions)
@@ -1165,7 +1330,7 @@ Document:
 - [ ] Can SSH from Bastion to Backend instances
 - [ ] Frontend target group shows 2 healthy instances
 - [ ] Backend target group shows 2 healthy instances
-- [ ] ALB DNS resolves and responds on both port 80 and 443
+- [ ] ALB DNS resolves and responds on ports 80, 443, and 3000
 - [ ] HTTPS works with valid certificate
 - [ ] HTTP automatically redirects to HTTPS
 
@@ -1287,6 +1452,7 @@ nslookup RDS_ENDPOINT
 # Test port connectivity
 nc -zv RDS_ENDPOINT 5432
 nc -zv ALB_DNS 80
+nc -zv ALB_DNS 3000
 
 # Check routes
 ip route
